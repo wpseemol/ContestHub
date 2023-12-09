@@ -1,0 +1,435 @@
+const express = require('express');
+const app = express();
+const cors = require('cors');
+require('dotenv').config();
+const cookieParser = require('cookie-parser');
+const jwt = require('jsonwebtoken');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const port = process.env.PORT || 5000;
+
+// middleware
+const corsOptions = {
+    origin: [
+        'http://localhost:5173',
+        'https://contesthub-a8675.web.app',
+        'https://superlative-boba-1e1ca5.netlify.app',
+    ],
+    credentials: true,
+    optionSuccessStatus: 200,
+};
+app.use(cors(corsOptions));
+app.use(express.json());
+app.use(cookieParser());
+
+// token verify
+const verifyToken = async (req, res, next) => {
+    const token = req.cookies['access-token'];
+    if (!token) {
+        return res.status(401).send({ message: 'unauthorized' });
+    }
+    jwt.verify(token, process.env.SECRET, (err, decoded) => {
+        if (err) {
+            return res.status(401).send({ message: 'unauthorized' });
+        }
+
+        req.user = decoded;
+        next();
+    });
+};
+
+//mongodb fun start
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const uri = `mongodb+srv://${process.env.DB_NAME}:${process.env.DB_PASSWORD}@wpseemol.l30sqti.mongodb.net/?retryWrites=true&w=majority`;
+
+// Create a MongoClient with a MongoClientOptions object to set the Stable API version
+const client = new MongoClient(uri, {
+    serverApi: {
+        version: ServerApiVersion.v1,
+        strict: true,
+        deprecationErrors: true,
+    },
+});
+
+async function run() {
+    try {
+        const contestHub = client.db('contestHub');
+
+        // all collection
+        const userCollection = contestHub.collection('users');
+        const contestsCollection = contestHub.collection('contests');
+        const enrollmentCollection = contestHub.collection('enrollment');
+        const winnerCollection = contestHub.collection('winner');
+
+        //verify Contest Creator
+        const verifyContestCreator = async (req, res, next) => {
+            const query = {
+                uEmail: req?.user?.email,
+            };
+            const options = {
+                projection: {
+                    role: 1,
+                },
+            };
+            const result = await userCollection.findOne(query, options);
+
+            if (result.role === 'contest-creator') {
+                next();
+            } else {
+                return res
+                    .status(401)
+                    .send({ message: 'You have no permission' });
+            }
+        };
+        //verify Contest Creator
+        const verifyAdmin = async (req, res, next) => {
+            const query = {
+                uEmail: req?.user?.email,
+            };
+            const options = {
+                projection: {
+                    role: 1,
+                },
+            };
+            const result = await userCollection.findOne(query, options);
+
+            if (result.role === 'admin') {
+                next();
+            } else {
+                return res
+                    .status(401)
+                    .send({ message: 'You have no permission' });
+            }
+        };
+        //verify Contest Creator
+        const verifyAdminOrCreator = async (req, res, next) => {
+            const query = {
+                uEmail: req?.user?.email,
+            };
+            const options = {
+                projection: {
+                    role: 1,
+                },
+            };
+            const result = await userCollection.findOne(query, options);
+
+            if (result.role === 'admin' || 'contest-creator') {
+                next();
+            } else {
+                return res
+                    .status(401)
+                    .send({ message: 'You have no permission' });
+            }
+        };
+
+        //my contest created
+        app.get(
+            '/contests',
+            verifyToken,
+            verifyContestCreator,
+            async (req, res) => {
+                const creatorContest = req?.query?.email;
+                const pageNumber = req.query.pageNumber;
+                const offset = pageNumber;
+                const limit = 10;
+
+                const query = { 'author.email': creatorContest };
+
+                const result = await contestsCollection
+                    .find(query)
+                    .skip(offset * limit)
+                    .limit(limit)
+                    .toArray();
+
+                const contestCount = await contestsCollection
+                    .find(query)
+                    .toArray();
+
+                res.send({
+                    myAllContest: result,
+                    contestCount: contestCount.length,
+                });
+            }
+        );
+
+        //single contest details
+        app.get(
+            '/contests-details/:id',
+
+            async (req, res) => {
+                const contestId = req.params.id;
+
+                const query = { _id: new ObjectId(contestId) };
+                const result = await contestsCollection.findOne(query);
+
+                res.send(result);
+            }
+        );
+
+        // search backend fun
+        app.get('/search-contests', async (req, res) => {
+            const creatorSearchText = req.query.search;
+
+            const query = {
+                contestType: { $regex: creatorSearchText, $options: 'i' },
+            };
+
+            const result = await contestsCollection.find(query).toArray();
+            res.send(result);
+        });
+
+        //count data get
+        app.get('/contests/:category', async (req, res) => {
+            const contestCategory = req.params.category;
+
+            const query = { contestType: contestCategory };
+
+            const result = await contestsCollection.find(query).toArray();
+
+            res.send({ contestCount: result.length });
+        });
+        //    pagination function
+        app.get('/contests-category', async (req, res) => {
+            const contestCategory = req.query.category;
+            const pageNumber = req.query.pageNumber;
+
+            const offset = pageNumber;
+            const limit = 10;
+
+            const query = { contestType: contestCategory };
+
+            const result = await contestsCollection
+                .find(query)
+                .skip(offset * limit)
+                .limit(limit)
+                .toArray();
+            res.send(result);
+        });
+
+        // get top Participate contest
+        app.get('/top-participate', async (req, res) => {
+            const sort = { buyCount: -1 };
+            const offset = 0;
+            const limit = 4;
+            const topContestParticipate = contestsCollection
+                .find()
+                .sort(sort)
+                .skip(offset)
+                .limit(limit);
+
+            const result = await topContestParticipate.toArray();
+            res.send(result);
+        });
+
+        // leader board backend fun
+        app.get('/leader-board', async (req, res) => {
+            const sort = { winner: -1 };
+
+            const result = await winnerCollection.find().sort(sort).toArray();
+
+            res.send(result);
+        });
+
+        //contest add
+        app.post(
+            '/contests',
+            verifyToken,
+            verifyContestCreator,
+            async (req, res) => {
+                const contest = req.body;
+                const result = await contestsCollection.insertOne(contest);
+                res.send(result);
+                console.log('Add contest successful');
+            }
+        );
+
+        // all contest for admin
+        app.get('/all-contests', verifyToken, verifyAdmin, async (req, res) => {
+            const pageNumber = req.query.pageNumber;
+
+            const offset = pageNumber;
+            const limit = 10;
+
+            const result = await contestsCollection
+                .find()
+                .skip(offset * limit)
+                .limit(limit)
+                .toArray();
+            const countResult =
+                await contestsCollection.estimatedDocumentCount();
+
+            res.send({ allContest: result, contestCount: countResult });
+        });
+
+        // Enrollment
+        app.post('/enrollment', verifyToken, async (req, res) => {
+            const enrolContest = req.body;
+            try {
+                const result = await enrollmentCollection.insertOne(
+                    enrolContest
+                );
+                res.send(result);
+            } catch (error) {
+                res.status(400).send('you ar already payment');
+            }
+        });
+        app.put('/enrollment/:id', verifyToken, async (req, res) => {
+            const enrolContestId = req.params.id;
+            const enrolContestElement = req.body;
+
+            const filter = { enrolContestId: enrolContestId };
+
+            const updateDoc = {
+                enrolContestElement,
+            };
+            // Update the first document that matches the filter
+            const result = await enrollmentCollection.updateOne(
+                filter,
+                updateDoc
+            );
+            res.send(result);
+        });
+
+        //payment intent
+        app.post('/create-payment-intent', async (req, res) => {
+            const { price } = req.body;
+            const amount = parseInt(price * 100);
+
+            const paymentIntent = await stripe.paymentIntents.create({
+                amount: amount,
+                currency: 'usd',
+                payment_method_types: ['card'],
+            });
+
+            res.send({
+                clientSecret: paymentIntent.client_secret,
+            });
+        });
+
+        // contest deleted
+        app.delete(
+            '/contests/:id',
+            verifyToken,
+            verifyAdminOrCreator,
+            async (req, res) => {
+                const contestRemoveId = req.params.id;
+
+                const query = {
+                    _id: new ObjectId(contestRemoveId),
+                };
+                const result = await contestsCollection.deleteOne(query);
+                res.send(result);
+                console.log('contest deleted successful');
+            }
+        );
+
+        // User registration
+        app.post('/users', async (req, res) => {
+            const newUser = req.body;
+            const userEmail = newUser.uEmail;
+
+            const existingUser = await userCollection.findOne({
+                uEmail: userEmail,
+            });
+
+            if (existingUser) {
+                res.status(409).json({
+                    error: 'User with this email already exists.',
+                });
+            } else {
+                const result = await userCollection.insertOne(newUser);
+                res.send(result);
+                console.log('User Created Success');
+            }
+        });
+
+        app.put('/users', async (req, res) => {
+            const user = req.body;
+            const filter = { uEmail: user.uEmail };
+            const updateDoc = {
+                $set: {
+                    role: user.role,
+                },
+            };
+            const result = await userCollection.updateOne(filter, updateDoc);
+            res.send(result);
+        });
+        // User registration
+
+        // all user manage
+        app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
+            const pageNumber = req.query.pageNumber;
+
+            const offset = pageNumber;
+            const limit = 10;
+
+            const result = await userCollection
+                .find()
+                .skip(offset * limit)
+                .limit(limit)
+                .toArray();
+            const userCount = await userCollection.estimatedDocumentCount();
+
+            res.send({ allUser: result, userCount: userCount });
+        });
+
+        // user role
+        app.get('/user-role', verifyToken, async (req, res) => {
+            const email = req?.user?.email;
+
+            const query = {
+                uEmail: email,
+            };
+            const options = {
+                projection: {
+                    role: 1,
+                },
+            };
+            const result = await userCollection.findOne(query, options);
+            res.send(result);
+        });
+
+        // jwt created start
+        app.post('/jwt', async (req, res) => {
+            const user = req.body;
+
+            const token = jwt.sign(user, process.env.SECRET, {
+                expiresIn: '30d',
+            });
+
+            res.cookie('access-token', token, {
+                httpOnly: true,
+                secure: true,
+                sameSite: 'none',
+            }).send({ success: true });
+        });
+
+        // cookie remove
+        app.post('/logout', (req, res) => {
+            // Clear the 'access-token' cookie
+            res.cookie('access-token', '', {
+                expires: new Date(0),
+                httpOnly: true,
+                secure: true,
+                sameSite: 'none',
+            });
+
+            res.send({ success: true });
+        });
+
+        // jwt created end
+    } finally {
+        // Ensures that the client will close when you finish/error
+        // await client.close();
+    }
+}
+run().catch(console.dir);
+
+//mongodb fun end
+
+app.get('/', (req, res) => {
+    res.send('ContestHub Server ...');
+});
+
+app.listen(port, () => {
+    console.log(`ContestHub Server is running on port ${port}`);
+});
